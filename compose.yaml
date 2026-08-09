@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: mc-discord:local
+    pull_policy: build
     container_name: mc-discord
     restart: unless-stopped
     env_file:
