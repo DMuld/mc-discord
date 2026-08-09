@@ -1,0 +1,18 @@
+services:
+  mc-discord:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mc-discord:local
+    container_name: mc-discord
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - minecraftserver:/data:ro
+    command: ["-log", "/data/logs/latest.log"]
+
+volumes:
+  minecraftserver:
+    external: true
+    name: minecraftserverwithvps_minecraftserver #Replace this with what is needed.
