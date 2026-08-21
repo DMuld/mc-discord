@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,11 @@ var (
 	joinRE        = regexp.MustCompile(`(?i): ([^:]+) joined the game`)
 	leftRE        = regexp.MustCompile(`(?i): ([^:]+) left the game`)
 	advancementRE = regexp.MustCompile(`(?i): ([^:]+) has made the advancement (\[.*\])`)
+
+	// Captures Java Edition player death messages as emitted to latest.log.
+	deathRE = regexp.MustCompile(
+		`(?i): ([A-Za-z0-9_]{1,16} (?:was |died|drowned|fell |hit |walked |went |blew |burned |suffocated|starved|froze|withered|experienced |discovered |tried |slain|killed).*)$`,
+	)
 
 	httpClient = &http.Client{
 		Timeout: 15 * time.Second,
@@ -155,12 +161,12 @@ func logWasRotatedOrTruncated(path string, openFile *os.File, openID fileID) (bo
 		return false, err
 	}
 
-	// `latest.log` was replaced with a new file.
+	// latest.log was replaced with a new file.
 	if pathID != openID {
 		return true, nil
 	}
 
-	// Same file path/inode, but it was truncated in place.
+	// The current file was truncated in place.
 	position, err := openFile.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return false, err
@@ -182,6 +188,7 @@ func getFileIDFromInfo(info os.FileInfo) (fileID, error) {
 	if !ok {
 		return fileID{}, fmt.Errorf("unsupported filesystem stat type %T", info.Sys())
 	}
+
 	return fileID{
 		dev: uint64(stat.Dev),
 		ino: uint64(stat.Ino),
@@ -201,11 +208,17 @@ func discordMessage(line string) string {
 		return fmt.Sprintf("🏆 **%s** has made the advancement %s", match[1], match[2])
 	}
 
+	if match := deathRE.FindStringSubmatch(line); match != nil {
+		return fmt.Sprintf("💀 %s", match[1])
+	}
+
 	return ""
 }
 
 func sendDiscord(webhookURL, content string) error {
-	payload, err := json.Marshal(map[string]string{"content": content})
+	payload, err := json.Marshal(map[string]string{
+		"content": content,
+	})
 	if err != nil {
 		return err
 	}
@@ -232,12 +245,14 @@ func sendDiscord(webhookURL, content string) error {
 			if attempt == 2 {
 				return err
 			}
+
 			time.Sleep(time.Duration(attempt+1) * time.Second)
 			continue
 		}
 
 		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		resp.Body.Close()
+
 		if readErr != nil {
 			return readErr
 		}
@@ -247,7 +262,7 @@ func sendDiscord(webhookURL, content string) error {
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests && attempt < 2 {
-			wait := retryAfter(resp)
+			wait := retryAfter(resp, responseBody)
 			fmt.Fprintf(os.Stderr, "Discord rate limited request; retrying in %s\n", wait)
 			time.Sleep(wait)
 			continue
@@ -263,18 +278,19 @@ func sendDiscord(webhookURL, content string) error {
 	return errors.New("Discord request failed after retries")
 }
 
-func retryAfter(resp *http.Response) time.Duration {
+func retryAfter(resp *http.Response, body []byte) time.Duration {
 	if value := resp.Header.Get("Retry-After"); value != "" {
-		if seconds, err := time.ParseDuration(value + "s"); err == nil && seconds > 0 {
-			return seconds
+		if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
+			return time.Duration(seconds * float64(time.Second))
 		}
 	}
 
-	var body struct {
+	var response struct {
 		RetryAfter float64 `json:"retry_after"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err == nil && body.RetryAfter > 0 {
-		return time.Duration(body.RetryAfter * float64(time.Second))
+
+	if err := json.Unmarshal(body, &response); err == nil && response.RetryAfter > 0 {
+		return time.Duration(response.RetryAfter * float64(time.Second))
 	}
 
 	return 2 * time.Second
